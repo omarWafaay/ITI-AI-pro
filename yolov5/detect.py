@@ -42,80 +42,16 @@ import streamlit as st
 import pandas as pd
 import time
 # from detect import detect
-
 import os
 import sys
 import argparse
 from PIL import Image
 import PIL
 import base64
-
-st.set_page_config(
-    page_title="Hassan Baydoun - Final Project Python",
-)
-
-@contextmanager
-def st_redirect(src, dst):
-    '''
-        Redirects the print of a function to the streamlit UI.
-    '''
-    placeholder = st.empty()
-    output_func = getattr(placeholder, dst)
-
-    with StringIO() as buffer:
-        old_write = src.write
-
-        def new_write(b):
-            if getattr(current_thread(), REPORT_CONTEXT_ATTR_NAME, None):
-                buffer.write(b)
-                output_func(buffer.getvalue())
-            else:
-                old_write(b)
-
-        try:
-            src.write = new_write
-            yield
-        finally:
-            src.write = old_write
-
-
-@contextmanager
-def st_stdout(dst):
-    '''
-        Sub-implementation to redirect for code redability.
-    '''
-    with st_redirect(sys.stdout, dst):
-        yield
-
-
-@contextmanager
-def st_stderr(dst):
-    '''
-        Sub-implementation to redirect for code redability in case of errors.
-    '''
-    with st_redirect(sys.stderr, dst):
-        yield
-
-def _all_subdirs_of(b='.'):
-    '''
-        Returns all sub-directories in a specific Path
-    '''
-    result = []
-    for d in os.listdir(b):
-        bd = os.path.join(b, d)
-        if os.path.isdir(bd): result.append(bd)
-    return result
-
-def _get_latest_folder():
-    '''
-        Returns the latest folder in a runs\detect
-    '''
-    return max(_all_subdirs_of(os.path.join('runs', 'detect')), key=os.path.getmtime)
-
-
+from pdf2image import convert_from_path
 
 @torch.no_grad()
-def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
+def run(weights=ROOT / 'yolo_best.pt',  # model.pt path(s)
         source=ROOT / 'data/images',  # file/dir/URL/glob, 0 for webcam
         imgsz=640,  # inference size (pixels)
         conf_thres=0.25,  # confidence threshold
@@ -156,27 +92,28 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     # Load model
     device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn)
-    stride, names, pt, jit, onnx, engine = model.stride, model.names, model.pt, model.jit, model.onnx, model.engine
+    stride, names, pt, jit, onnx = model.stride, model.names, model.pt, model.jit, model.onnx
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Half
-    half &= (pt or jit or engine) and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
-    if pt or jit:
-        model.model.half() if half else model.model.float()
+    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+    if pt:
+        _=model.model.half() if half else model.model.float()
 
     # Dataloader
     if webcam:
         view_img = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt and not jit)
         bs = len(dataset)  # batch_size
     else:
-        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
+        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt and not jit)
         bs = 1  # batch_size
     vid_path, vid_writer = [None] * bs, [None] * bs
 
     # Run inference
-    model.warmup(imgsz=(1, 3, *imgsz), half=half)  # warmup
+    if pt and device.type != 'cpu':
+        model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
     dt, seen = [0.0, 0.0, 0.0], 0
     for path, im, im0s, vid_cap, s in dataset:
         t1 = time_sync()
@@ -242,7 +179,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                             save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
 
             # Print time (inference-only)
-            LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
+            # LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
 
             # Stream results
             im0 = annotator.result()
@@ -271,10 +208,10 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
-    LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
+    # LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
     if save_txt or save_img:
         s = f"\n{len(list(save_dir.glob('labels/*.txt')))} labels saved to {save_dir / 'labels'}" if save_txt else ''
-        LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
+        # LOGGER.info(f"Results saved to {colorstr('bold', save_dir)}{s}")
     if update:
         strip_optimizer(weights)  # update model (to fix SourceChangeWarning)
 
@@ -296,22 +233,22 @@ def parse_opt():
     parser.add_argument('--classes', nargs='+', type=int, help='filter by class: --classes 0, or --classes 0 2 3')
     parser.add_argument('--agnostic-nms', action='store_true', help='class-agnostic NMS')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
-    parser.add_argument('--visualize', action='store_true', help='visualize features')
+    parser.add_argument('--visualize',default=False, action='store_true', help='visualize features')
     parser.add_argument('--update', action='store_true', help='update all models')
     parser.add_argument('--project', default=ROOT / 'runs/detect', help='save results to project/name')
     parser.add_argument('--name', default='exp', help='save results to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--line-thickness', default=3, type=int, help='bounding box thickness (pixels)')
-    parser.add_argument('--hide-labels', default=False, action='store_true', help='hide labels')
-    parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
+    parser.add_argument('--hide-labels', default=True, action='store_true', help='hide labels')
+    parser.add_argument('--hide-conf', default=True, action='store_true', help='hide confidences')
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
-    print_args(FILE.stem, opt)
+    # print_args(FILE.stem, opt)
     return opt
 
-
+#
 # def main(opt):
 #     check_requirements(exclude=('tensorboard', 'thop'))
 #     run(**vars(opt))
@@ -322,15 +259,75 @@ def parse_opt():
 #     main(opt)
 
 
-opt = parse_opt()
-check_requirements(exclude=('tensorboard', 'thop'))
+@contextmanager
+def st_redirect(src, dst):
+    '''
+        Redirects the print of a function to the streamlit UI.
+    '''
+    placeholder = st.empty()
+    output_func = getattr(placeholder, dst)
 
+    with StringIO() as buffer:
+        old_write = src.write
+
+        def new_write(b):
+            if getattr(current_thread(), REPORT_CONTEXT_ATTR_NAME, None):
+                buffer.write(b)
+                output_func(buffer.getvalue())
+            else:
+                old_write(b)
+
+        try:
+            src.write = new_write
+            yield
+        finally:
+            src.write = old_write
+
+
+@contextmanager
+def st_stdout(dst):
+    '''
+        Sub-implementation to redirect for code redability.
+    '''
+    with st_redirect(sys.stdout, dst):
+        yield
+
+
+@contextmanager
+def st_stderr(dst):
+    '''
+        Sub-implementation to redirect for code redability in case of errors.
+    '''
+    with st_redirect(sys.stderr, dst):
+        yield
+
+def _all_subdirs_of(b='.'):
+    '''
+        Returns all sub-directories in a specific Path
+    '''
+    result = []
+    for d in os.listdir(b):
+        bd = os.path.join(b, d)
+        if os.path.isdir(bd): result.append(bd)
+    return result
+
+def _get_latest_folder():
+    '''
+        Returns the latest folder in a runs\detect
+    '''
+    return max(_all_subdirs_of(os.path.join('runs', 'detect')), key=os.path.getmtime)
+
+
+
+opt = parse_opt()
+
+CHOICES = {0: "Image Upload", 1: "Upload PDF"}
 
 def _save_uploadedfile(uploadedfile):
     '''
         Saves uploaded videos to disk.
     '''
-    with open(os.path.join("data", "videos",uploadedfile.name),"wb") as f:
+    with open(os.path.join("data", "pdfs",uploadedfile.name),"wb") as f:
         f.write(uploadedfile.getbuffer())
 
 
@@ -340,33 +337,68 @@ def _format_func(option):
     '''
     return CHOICES[option]
 
+inferenceSource = str(st.sidebar.selectbox('Select Source to detect:', options=list(CHOICES.keys()), format_func=_format_func))
 
-
-
-uploaded_file = st.sidebar.file_uploader("Upload Image", type=['png','jpeg', 'jpg'])
-if uploaded_file is not None:
-    is_valid = True
-    with st.spinner(text='In progress'):
-        st.sidebar.image(uploaded_file)
-        picture = Image.open(uploaded_file)
-        picture = picture.save(f'data/images/{uploaded_file.name}')
-        opt.source = f'data/images/{uploaded_file.name}'
+if inferenceSource == '0':
+    uploaded_file = st.sidebar.file_uploader("Upload Image", type=['png','jpeg', 'jpg'])
+    if uploaded_file is not None:
+        is_valid = True
+        with st.spinner(text='In progress'):
+            st.sidebar.image(uploaded_file)
+            picture = Image.open(uploaded_file)
+            picture = picture.save(f'data/images/{uploaded_file.name}')
+            opt.source = f'data/images/{uploaded_file.name}'
+    else:
+        is_valid = False
 else:
-    is_valid = False
+    uploaded_file = st.sidebar.file_uploader("Upload PDF", type=['pdf'])
+    if uploaded_file is not None:
+        is_valid = True
+        with st.spinner(text='In progress'):
+            # st.sidebar.pdf(uploaded_file)
+            _save_uploadedfile(uploaded_file)
+            output_dir= f'data/pdfs'
+            pdf_name = uploaded_file.name.split(".pdf")[0]
+            output_path = os.path.join(output_dir, pdf_name)
+            if not os.path.exists(output_path):
+                os.makedirs(output_path)
 
+                pages = convert_from_path(f'data/pdfs/{uploaded_file.name}', dpi=600,
+                                          output_folder=output_path, output_file="", fmt="png",
+                                          poppler_path=r"E:\Softwares\Poppoler\poppler-21.11.0\Library\bin")
 
-st.title('Mathematical Formula Detector!')
-st.subheader('Supervised by Eng. Hazem Mamdouh')
+            opt.source = output_path
+    else:
+        is_valid = False
+
+st.title('ITI Graduation Project')
+st.subheader('In collaboration with RDI')
 
 inferenceButton = st.empty()
 
 if is_valid:
     if inferenceButton.button('Launch the Detection!'):
         with st_stdout("info"):
+            check_requirements(exclude=('tensorboard', 'thop'))
             run(**vars(opt))
+        if inferenceSource != '0':
+            # st.warning('Loading PDF images')
+            with st.spinner(text='Preparing PDF'):
+                for pdf_img in os.listdir(_get_latest_folder()):
+                    st.image(f'{_get_latest_folder()}/{pdf_img}')
+                # pdf_img=os.listdir(_get_latest_folder())
+                # index = st.number_input('Index',value=0)
+                # if st.button('Next'):
+                #     index += 1
+                #
+                # if st.button('Prev'):
+                #     if index > 0:
+                #         index = index - 1
+                #
+                # st.image(os.path.join(_get_latest_folder(),pdf_img[index]), use_column_width=True)
 
-
-        with st.spinner(text='Preparing Images'):
-            for img in os.listdir(_get_latest_folder()):
-                st.image(f'{_get_latest_folder()}/{img}')
-            st.balloons()
+        else:
+            with st.spinner(text='Preparing Images'):
+                for img in os.listdir(_get_latest_folder()):
+                    st.image(f'{_get_latest_folder()}/{img}')
+                # st.balloons()
